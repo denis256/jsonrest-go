@@ -20,3 +20,6 @@ vendor
 
 # Tooling binaries.
 bin/
+
+# Test coverage output
+test-coverage.html

@@ -67,6 +67,7 @@ func TestJSONType(t *testing.T) {
 	}{
 		{1, "integer"},
 		{1.2, "number"},
+		{true, "boolean"},
 		{[]string{}, "array"},
 		{[...]string{}, "array"},
 		{time.Now(), "time"},

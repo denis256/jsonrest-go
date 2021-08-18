@@ -22,7 +22,8 @@ setup:  ## Download dependencies.
 
 .PHONY: test
 test:  ## Run tests.
-	@go test ./...
+	@go test -coverprofile=test-coverage.out ./...
+	@go tool cover -html=test-coverage.out -o test-coverage.html
 
 .PHONY: help
 help:

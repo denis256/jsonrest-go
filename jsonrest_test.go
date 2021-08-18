@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -19,12 +20,15 @@ import (
 
 func TestSimpleGet(t *testing.T) {
 	r := jsonrest.NewRouter()
+	invokedMethod := ""
 	r.Get("/hello", func(ctx context.Context, r *jsonrest.Request) (interface{}, error) {
+		invokedMethod = r.Method()
 		return jsonrest.M{"message": "Hello World"}, nil
 	})
 
 	w := do(r, http.MethodGet, "/hello", nil, "application/json")
 	assert.Equal(t, w.Result().StatusCode, 200)
+	assert.Equal(t, invokedMethod, "GET")
 	assert.JSONEqual(t, w.Body.String(), m{"message": "Hello World"})
 }
 
@@ -106,6 +110,27 @@ func TestRequestURLParams(t *testing.T) {
 	w := do(r, http.MethodGet, "/users/123", nil, "application/json")
 	assert.Equal(t, w.Result().StatusCode, 200)
 	assert.JSONEqual(t, w.Body.String(), m{"id": "123"})
+}
+
+func TestRequestURLQueryParams(t *testing.T) {
+	r := jsonrest.NewRouter()
+	r.Get("/query", func(ctx context.Context, r *jsonrest.Request) (interface{}, error) {
+		id := r.Query("id")
+		if id == "" {
+			return nil, errors.New("missing id")
+		}
+		return jsonrest.M{"id": id}, nil
+	})
+
+	t.Run("passing valid id", func(t *testing.T) {
+		w := do(r, http.MethodGet, "/query?id=666", nil, "application/json")
+		assert.Equal(t, w.Result().StatusCode, 200)
+		assert.JSONEqual(t, w.Body.String(), m{"id": "666"})
+	})
+	t.Run("missing id", func(t *testing.T) {
+		we := do(r, http.MethodGet, "/query", nil, "application/json")
+		assert.Equal(t, we.Result().StatusCode, 500)
+	})
 }
 
 func TestNotFound(t *testing.T) {
@@ -254,6 +279,130 @@ func TestMiddleware(t *testing.T) {
 		assert.Equal(t, w.Result().StatusCode, 200)
 		assert.False(t, called)
 	})
+}
+
+func TestPanicHandling(t *testing.T) {
+	r := jsonrest.NewRouter()
+	panicExecuted := false
+	r.Get("/panic", func(ctx context.Context, r *jsonrest.Request) (interface{}, error) {
+		panicExecuted = true
+		panic(errors.New("test panic"))
+	})
+
+	w := do(r, http.MethodGet, "/panic", nil, "application/json")
+	assert.True(t, panicExecuted)
+	assert.Equal(t, w.Result().StatusCode, 500)
+	assert.JSONEqual(t, w.Body.String(), m{
+		"error": m{
+			"code": "unknown_error", "message": "an unknown error occurred",
+		},
+	},
+	)
+}
+
+func TestRouteMapConfiguration(t *testing.T) {
+	r := jsonrest.NewRouter()
+	r.Routes(
+		jsonrest.RouteMap{
+			"GET  /get": func(ctx context.Context, r *jsonrest.Request) (interface{}, error) {
+				return jsonrest.M{"message": "get response"}, nil
+			},
+			"HEAD  /head": func(ctx context.Context, r *jsonrest.Request) (interface{}, error) {
+				return jsonrest.M{"message": "head response"}, nil
+			},
+			"POST  /post": func(ctx context.Context, r *jsonrest.Request) (interface{}, error) {
+				return jsonrest.M{"message": "post response"}, nil
+			},
+			"PUT  /put": func(ctx context.Context, r *jsonrest.Request) (interface{}, error) {
+				return jsonrest.M{"message": "put response"}, nil
+			},
+		})
+
+	tests := []struct {
+		method   string
+		path     string
+		status   int
+		response string
+	}{
+		{
+			method:   "GET",
+			path:     "/get",
+			status:   200,
+			response: "get response",
+		},
+		{
+			method:   "HEAD",
+			path:     "/head",
+			status:   200,
+			response: "head response",
+		},
+		{
+			method:   "POST",
+			path:     "/post",
+			status:   200,
+			response: "post response",
+		},
+		{
+			method:   "PUT",
+			path:     "/put",
+			status:   200,
+			response: "put response",
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(fmt.Sprintf("test %d", i), func(t *testing.T) {
+			w := do(r, tt.method, tt.path, nil, "application/json")
+			assert.Equal(t, w.Result().StatusCode, tt.status)
+			assert.JSONEqual(t, w.Body.String(), m{"message": tt.response})
+		})
+	}
+}
+
+func TestInvalidRouteMapConfiguration(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("jsonrest.RouteMap should pannic when configured with invalid mapping")
+		}
+	}()
+	r := jsonrest.NewRouter()
+	r.Routes(
+		jsonrest.RouteMap{
+			"some random text": func(ctx context.Context, r *jsonrest.Request) (interface{}, error) {
+				return jsonrest.M{"message": "random response"}, nil
+			},
+		})
+}
+
+func TestDataPassing(t *testing.T) {
+	r := jsonrest.NewRouter()
+
+	r.Use(func(next jsonrest.Endpoint) jsonrest.Endpoint {
+		return func(ctx context.Context, req *jsonrest.Request) (interface{}, error) {
+			req.Set("testKey", jsonrest.M{"message": "Middleware message"})
+			req.SetResponseHeader("Middleware-Handled-Route", req.Route())
+			req.SetResponseHeader("Middleware-Content-Type", req.Header("Content-Type"))
+			return next(ctx, req)
+		}
+	})
+	r.Get("/test", func(ctx context.Context, req *jsonrest.Request) (interface{}, error) { return req.Get("testKey"), nil })
+
+	w := do(r, http.MethodGet, "/test", nil, "application/json")
+	assert.Equal(t, w.Result().StatusCode, 200)
+	assert.Equal(t, w.Header().Get("Middleware-Handled-Route"), "/test")
+	assert.Equal(t, w.Header().Get("Middleware-Content-Type"), "application/json")
+	assert.JSONEqual(t, w.Body.String(), m{"message": "Middleware message"})
+}
+
+func TestHead(t *testing.T) {
+	r := jsonrest.NewRouter()
+	r.Head("/head", func(ctx context.Context, r *jsonrest.Request) (interface{}, error) {
+		return jsonrest.M{"message": "Head response"}, nil
+	})
+
+	w := do(r, http.MethodHead, "/head", nil, "application/json")
+	assert.Equal(t, w.Result().StatusCode, 200)
+	assert.JSONEqual(t, w.Body.String(), m{"message": "Head response"})
 }
 
 type m map[string]interface{}
